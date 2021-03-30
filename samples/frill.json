@@ -1,20 +1,31 @@
 {
-    "sources": [
-        "./test.vert",
+  "sources": [
+    "./test.ext.vert",
+    {
+      "file": "test.frag",
+      "multi_compile": [
         {
-            "file": "test.frag",
-            "multi_compile": [
-                {
-                    "options": [
-                        "FLAG_A",
-                        "FLAG_B"
-                    ],
-                    "can_off": true // true by default
-                },
-                "SIMPLE_FLAG"
-            ]
-        }
-    ],
-    "includes": [],
-    "subdirectories": []
+          "options": [
+            "FLAG_A",
+            "FLAG_B"
+          ],
+          "can_off": false
+        },
+        "SIMPLE_FLAG",
+        [
+          "ARRAY_FLAG_A",
+          "ARRAY_FLAG_B"
+        ]
+      ],
+      "includes": [
+        "dir_1"
+      ]
+    }
+  ],
+  "includes": [
+    "include"
+  ],
+  "subdirectories": [
+    "dir_1"
+  ]
 }
