@@ -1,0 +1,20 @@
+{
+    "sources": [
+        "./test.vert",
+        {
+            "file": "test.frag",
+            "multi_compile": [
+                {
+                    "options": [
+                        "FLAG_A",
+                        "FLAG_B"
+                    ],
+                    "can_off": true // true by default
+                },
+                "SIMPLE_FLAG"
+            ]
+        }
+    ],
+    "includes": [],
+    "subdirectories": []
+}
