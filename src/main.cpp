@@ -1,16 +1,19 @@
 #include "thread_pool.hpp"
+#include <chrono>
 #include <filesystem>
 #include <fire-hpp/fire.hpp>
 #include <fstream>
 #include <functional>
 #include <iostream>
 #include <json/json.hpp>
+#include <optional>
 #include <set>
 #include <shaderc/shaderc.hpp>
 #include <sstream>
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace json = nlohmann;
@@ -49,26 +52,59 @@ write_file(const fs::path &file_path, const char *data, size_t size) {
   os.write(data, size);
   os.close();
 }
+static void write_file(const fs::path &file_path, const std::string &str) {
+  write_file(file_path, str.c_str(), str.size());
+}
+
+struct TargetId {
+  fs::path absolute_path;
+  std::set<std::string> flags;
+
+  json::json to_json() const {
+    json::json js{};
+    js["path"] = absolute_path;
+    auto flags_js = json::json::array();
+    for (auto &flag : flags) {
+      flags_js.push_back(flag);
+    }
+    js["flags"] = flags_js;
+    return js;
+  }
+
+  bool operator==(const TargetId &rhs) const {
+    return absolute_path == rhs.absolute_path && flags == rhs.flags;
+  }
+};
+
+static std::string time_to_string(const fs::file_time_type &time_point) {
+  std::stringstream ss;
+  auto tm = fs::file_time_type::clock::to_time_t(time_point);
+  ss << std::asctime(std::localtime(&tm));
+  return ss.str();
+}
+
+static std::string last_write_time_str(const fs::path &path) {
+  return time_to_string(fs::last_write_time(path));
+}
 
 struct Target {
   fs::path relative_path; // relative to input directory
-  fs::path absolute_path;
+  TargetId id{};
   std::set<fs::path> include_dirs;
-  std::set<std::string> flags;
   fs::path declaring_config_file; // absolute path
 
   std::string display() const {
     std::stringstream ss;
     ss << "{" << std::endl;
     ss << "\trelative_path:\t" << relative_path << "," << std::endl;
-    ss << "\tabsolute_path:\t" << absolute_path << "," << std::endl;
+    ss << "\tabsolute_path:\t" << id.absolute_path << "," << std::endl;
     ss << "\tinclude_dirs: [" << std::endl;
     for (auto &inc : include_dirs) {
       ss << "\t\t" << inc << "," << std::endl;
     }
     ss << "\t]," << std::endl;
     ss << "\tflags: [" << std::endl;
-    for (auto &flag : flags) {
+    for (auto &flag : id.flags) {
       ss << "\t\t" << flag << "," << std::endl;
     }
     ss << "\t]," << std::endl;
@@ -77,18 +113,245 @@ struct Target {
     return ss.str();
   }
 
-  fs::path output_file_relative_dir() const {
+  fs::path output_file_relative_dir(const std::string &ext = ".spv") const {
     std::stringstream ss;
     ss << relative_path.c_str();
-    for (auto &flag : flags) {
+    for (auto &flag : id.flags) {
       ss << "." << flag;
     }
-    ss << ".spv";
+    ss << ext;
     return ss.str();
   }
 
   bool operator==(const Target &rhs) const {
-    return absolute_path == rhs.absolute_path && flags == rhs.flags;
+    return id == rhs.id;
+  }
+
+  bool check_outdated(const fs::path &cache_path) const {
+    auto ts_path = get_time_stamp_path(cache_path);
+    try {
+      auto js = json::json::parse(read_file_str(ts_path));
+      for (auto &dep : js) {
+        auto p = dep["path"].get<std::string>();
+        auto ts = dep["time_stamp"].get<std::string>();
+        auto current_ts = fs::last_write_time(p);
+        if (time_to_string(current_ts) != ts) {
+          return true;
+        }
+      }
+      return false;
+    } catch (std::exception &e) {
+      std::cout << "failed to load cache " << ts_path << ": " << e.what()
+                << std::endl;
+    }
+    return true;
+  }
+
+  // return dependencies
+  void compile(const fs::path &output_dir, const fs::path &cache_path) const {
+    shaderc::Compiler compiler{};
+    shaderc::CompileOptions options{};
+    for (auto &flag : id.flags) {
+      options.AddMacroDefinition(flag);
+    }
+
+    class IncludeCallback : public shaderc::CompileOptions::IncluderInterface {
+    public:
+      IncludeCallback(std::set<fs::path> include_dirs,
+                      std::map<fs::path, std::string> *dep_time_stamps)
+          : _include_dirs(std::move(include_dirs)),
+            _dep_time_stamps(dep_time_stamps) {}
+
+      // Handles shaderc_include_resolver_fn callbacks.
+      shaderc_include_result *GetInclude(const char *requested_source,
+                                         shaderc_include_type type,
+                                         const char *requesting_source,
+                                         size_t include_depth) override {
+        constexpr size_t max_include_depth = 50;
+        if (include_depth > max_include_depth) {
+          std::stringstream ss;
+          ss << "include depth exceeds " << max_include_depth;
+          return include_error(ss.str());
+        }
+        auto absolute_include =
+            resolve_include(requested_source, type, requesting_source);
+        if (absolute_include.has_value()) {
+          _dep_time_stamps->emplace(*absolute_include,
+                                    last_write_time_str(*absolute_include));
+          return load_include(*absolute_include);
+        }
+        return include_error("failed to resolve include");
+      }
+
+      // Handles shaderc_include_result_release_fn callbacks.
+      void ReleaseInclude(shaderc_include_result *data) override {}
+
+    private:
+      shaderc_include_result *load_include(const fs::path &absolute_include) {
+        auto inc_path = absolute_include.string();
+        auto it = _results.find(inc_path);
+        if (it == _results.end()) {
+          try {
+            auto content = read_file_str(absolute_include);
+            _results[inc_path] =
+                std::make_unique<IncludeResult>(inc_path, content);
+          } catch (std::exception &e) {
+            return include_error(e.what());
+          }
+        }
+        return &_results[inc_path]->result;
+      }
+
+      shaderc_include_result *include_error(const std::string &err) {
+        auto error = std::make_unique<IncludeResult>(err);
+        auto res = &error->result;
+        _errors.emplace_back(std::move(error));
+        return res;
+      }
+
+      std::optional<fs::path>
+      resolve_include(const fs::path &requested_source,
+                      shaderc_include_type type,
+                      const fs::path &requesting_source) {
+        switch (type) {
+        case shaderc_include_type_relative:
+          return resolve_relative_include(requested_source, requesting_source);
+        case shaderc_include_type_standard:
+          return resolve_absolute_include(requested_source);
+        }
+        return std::nullopt;
+      }
+
+      std::optional<fs::path>
+      resolve_relative_include(const fs::path &requested_source,
+                               const fs::path &requesting_source) {
+        auto dir = requesting_source.parent_path() / requested_source;
+        if (fs::exists(dir)) {
+          return fs::canonical(dir);
+        }
+        return resolve_absolute_include(requested_source);
+      }
+
+      std::optional<fs::path>
+      resolve_absolute_include(const fs::path &requested_source) {
+        for (auto &inc : _include_dirs) {
+          auto dir = inc / requested_source;
+          if (fs::exists(dir)) {
+            return fs::canonical(dir);
+          }
+        }
+        return std::nullopt;
+      }
+
+      struct IncludeResult {
+        shaderc_include_result result{};
+        struct Data {
+          std::string name;
+          std::string content;
+        };
+        std::unique_ptr<Data> data{};
+
+        IncludeResult(std::string name, std::string content) {
+          data = std::make_unique<Data>();
+          data->name = std::move(name);
+          data->content = std::move(content);
+          result.user_data = nullptr;
+          result.source_name = data->name.c_str();
+          result.source_name_length = data->name.size();
+          result.content = data->content.c_str();
+          result.content_length = data->content.size();
+        }
+
+        explicit IncludeResult(std::string err) {
+          data = std::make_unique<Data>();
+          data->content = std::move(err);
+          result.user_data = nullptr;
+          result.source_name = nullptr;
+          result.source_name_length = 0;
+          result.content = data->content.c_str();
+          result.content_length = data->content.size();
+        }
+      };
+
+      std::unordered_map<std::string, std::unique_ptr<IncludeResult>> _results;
+      std::set<fs::path> _include_dirs;
+      std::map<fs::path, std::string> *_dep_time_stamps;
+      std::vector<std::unique_ptr<IncludeResult>> _errors;
+    };
+
+    std::map<fs::path, std::string> dep_time_stamps;
+    dep_time_stamps.emplace(
+        id.absolute_path,
+        time_to_string(fs::last_write_time(id.absolute_path)));
+
+    options.SetIncluder(
+        std::make_unique<IncludeCallback>(include_dirs, &dep_time_stamps));
+
+    auto src = read_file_str(id.absolute_path);
+    auto ext = id.absolute_path.extension();
+    shaderc_shader_kind kind = shaderc_glsl_default_vertex_shader;
+    static const std::map<std::string, shaderc_shader_kind> stages = {
+        {".vert", shaderc_glsl_default_vertex_shader},
+        {".frag", shaderc_glsl_default_fragment_shader},
+        {".tesc", shaderc_glsl_default_tess_control_shader},
+        {".tese", shaderc_glsl_default_tess_evaluation_shader},
+        {".geom", shaderc_glsl_default_geometry_shader},
+        {".comp", shaderc_glsl_default_compute_shader},
+        {".spvasm", shaderc_spirv_assembly},
+        {".rgen", shaderc_glsl_default_raygen_shader},
+        {".rahit", shaderc_glsl_default_anyhit_shader},
+        {".rchit", shaderc_glsl_default_closesthit_shader},
+        {".rmiss", shaderc_glsl_default_miss_shader},
+        {".rint", shaderc_glsl_default_intersection_shader},
+        {".rcall", shaderc_glsl_default_callable_shader},
+        {".task", shaderc_glsl_default_task_shader},
+        {".mesh", shaderc_glsl_default_mesh_shader},
+    };
+
+    {
+      auto it = stages.find(ext);
+      if (it != stages.end()) {
+        kind = it->second;
+      }
+    }
+
+    auto result =
+        compiler.CompileGlslToSpv(src, kind, id.absolute_path.c_str(), options);
+    if (result.GetCompilationStatus() != shaderc_compilation_status_success) {
+      std::stringstream ss;
+      ss << "flags: [";
+      {
+        size_t i = 0;
+        for (auto &flag : id.flags) {
+          if (i != 0) {
+            ss << ", ";
+          }
+          ss << flag;
+          i++;
+        }
+      }
+      ss << "] ";
+      ss << result.GetErrorMessage();
+      fprintf(stderr, "%s", ss.str().c_str());
+    } else {
+      auto beg = reinterpret_cast<const char *>(result.begin());
+      auto end = reinterpret_cast<const char *>(result.end());
+      write_file(fs::absolute(output_dir), beg, end - beg);
+
+      auto js = json::json::array();
+      for (auto &dep : dep_time_stamps) {
+        json::json term;
+        term["path"] = dep.first.string();
+        term["time_stamp"] = dep.second;
+        js.push_back(term);
+      }
+      write_file(get_time_stamp_path(cache_path), js.dump(2));
+    }
+  }
+
+private:
+  fs::path get_time_stamp_path(const fs::path &cache_path) const {
+    return cache_path / output_file_relative_dir(".tm.json");
   }
 };
 
@@ -99,14 +362,20 @@ inline void hash_combine(std::size_t &seed, const T &val) {
 }
 
 namespace std {
-template <> struct hash<Target> {
-  size_t operator()(const Target &target) const {
+template <> struct hash<TargetId> {
+  size_t operator()(const TargetId &id) const {
     size_t seed = 0;
-    hash_combine(seed, target.absolute_path.string());
-    for (auto &flag : target.flags) {
+    hash_combine(seed, id.absolute_path.string());
+    for (auto &flag : id.flags) {
       hash_combine(seed, flag);
     }
     return seed;
+  }
+};
+
+template <> struct hash<Target> {
+  size_t operator()(const Target &target) const {
+    return hash<TargetId>()(target.id);
   }
 };
 } // namespace std
@@ -195,13 +464,13 @@ static std::unordered_set<Target> load_directory(const fs::path &dir_path,
         [&](size_t flags_index) {
           if (flags_index == flag_combination.size()) {
             Target t;
-            t.absolute_path = absolute_path;
+            t.id.absolute_path = absolute_path;
             t.relative_path = relative_path;
             t.include_dirs = include_dirs;
             t.declaring_config_file = frill_file_path;
             for (auto flag : flag_combination) {
               if (strcmp(flag, "") != 0) {
-                t.flags.insert(flag);
+                t.id.flags.insert(flag);
               }
             }
             targets.emplace_back(std::move(t));
@@ -277,99 +546,68 @@ static int
 fired_main(const std::string &src_dir =
                fire::arg({"-S", "--source-dir", "source file directory"}, "."),
            const std::string &dst_dir =
-               fire::arg({"-B", "--output-directory", "output directory"}, "."),
+               fire::arg({"-B", "--output-dir", "output directory"}, "."),
+           const std::string &cache_dir =
+               fire::arg({"-C", "--cache-dir", "cache directory"}, "<dst_dir>"),
            unsigned int thread_count =
                fire::arg({"-j", "--thread-count", "worker thread count"},
                          std::thread::hardware_concurrency())) {
+  fs::path src_path = src_dir;
+  fs::path dst_path = dst_dir;
+  fs::path cache_path;
+  if (cache_dir == "<dst_dir>") {
+    cache_path = dst_path;
+  } else {
+    cache_path = cache_dir;
+  }
+  cache_path /= "__frill_cache__";
   try {
-    auto targets = load_directory(src_dir, src_dir);
+    auto targets = load_directory(src_path, src_path);
+
+    std::vector<Target> outdated_targets{};
+    for (auto &t : targets) {
+      if (t.check_outdated(cache_path)) {
+        outdated_targets.push_back(t);
+      }
+    }
+
     auto thread_pool = std::make_unique<ThreadPool>(thread_count);
     std::vector<std::future<void>> futures;
-    futures.reserve(targets.size());
+    futures.reserve(outdated_targets.size());
+
     {
       size_t index = 0;
-      for (auto &target : targets) {
-        thread_pool->schedule([index, &target, &dst_dir, &targets]() {
-          shaderc::Compiler compiler{};
-          shaderc::CompileOptions options{};
-          for (auto &flag : target.flags) {
-            options.AddMacroDefinition(flag);
-          }
-          try {
-            auto src = read_file_str(target.absolute_path);
-            auto ext = target.absolute_path.extension();
-            shaderc_shader_kind kind = shaderc_glsl_default_vertex_shader;
-            static const std::map<std::string, shaderc_shader_kind> stages = {
-                {".vert", shaderc_glsl_default_vertex_shader},
-                {".frag", shaderc_glsl_default_fragment_shader},
-                {".tesc", shaderc_glsl_default_tess_control_shader},
-                {".tese", shaderc_glsl_default_tess_evaluation_shader},
-                {".geom", shaderc_glsl_default_geometry_shader},
-                {".comp", shaderc_glsl_default_compute_shader},
-                {".spvasm", shaderc_spirv_assembly},
-                {".rgen", shaderc_glsl_default_raygen_shader},
-                {".rahit", shaderc_glsl_default_anyhit_shader},
-                {".rchit", shaderc_glsl_default_closesthit_shader},
-                {".rmiss", shaderc_glsl_default_miss_shader},
-                {".rint", shaderc_glsl_default_intersection_shader},
-                {".rcall", shaderc_glsl_default_callable_shader},
-                {".task", shaderc_glsl_default_task_shader},
-                {".mesh", shaderc_glsl_default_mesh_shader},
-            };
-
-            {
-              auto it = stages.find(ext);
-              if (it != stages.end()) {
-                kind = it->second;
-              }
-            }
-
-            {
-              std::stringstream ss;
-              ss << target.absolute_path;
-              for (auto &flag : target.flags) {
-                ss << " " << flag;
-              }
-              printf("[%zu/%zu] compiling %s\n",
-                     index,
-                     targets.size(),
-                     ss.str().c_str());
-            }
-            auto result = compiler.CompileGlslToSpv(
-                src, kind, target.absolute_path.c_str(), options);
-            if (result.GetCompilationStatus() !=
-                shaderc_compilation_status_success) {
-              std::stringstream ss;
-              ss << "flags: [";
-              {
-                size_t i = 0;
-                for (auto &flag : target.flags) {
-                  if (i != 0) {
-                    ss << ", ";
+      for (auto &target : outdated_targets) {
+        futures.emplace_back(
+            thread_pool->schedule([current_index = index,
+                                   task_count = outdated_targets.size(),
+                                   &target,
+                                   &dst_path,
+                                   &cache_path]() {
+              try {
+                {
+                  std::stringstream ss;
+                  ss << target.id.absolute_path;
+                  for (auto &flag : target.id.flags) {
+                    ss << " " << flag;
                   }
-                  ss << flag;
-                  i++;
+                  printf("[%zu/%zu] compiling %s\n",
+                         current_index + 1,
+                         task_count,
+                         ss.str().c_str());
                 }
+                target.compile(dst_path / target.output_file_relative_dir(),
+                               cache_path);
+              } catch (std::exception &e) {
+                fprintf(stderr, "%s\n", e.what());
               }
-              ss << "] ";
-              ss << result.GetErrorMessage();
-              fprintf(stderr, "%s", ss.str().c_str());
-            } else {
-              auto beg = reinterpret_cast<const char *>(result.begin());
-              auto end = reinterpret_cast<const char *>(result.end());
-              write_file(
-                  fs::absolute(dst_dir / target.output_file_relative_dir()),
-                  beg,
-                  end - beg);
-            }
-          } catch (std::exception &e) {
-            // use old style printf for sync with other threads
-            fprintf(stderr, "%s\n", e.what());
-          }
-        });
+            }));
 
         index++;
       }
+    }
+    if (outdated_targets.empty()) {
+      std::cout << "targets updated, nothing to compile" << std::endl;
     }
     for (auto &fut : futures) {
       fut.wait();
