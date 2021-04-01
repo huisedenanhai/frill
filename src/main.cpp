@@ -89,9 +89,16 @@ struct TargetId {
   }
 };
 
+template <typename TP> std::time_t to_time_t(TP tp) {
+  using namespace std::chrono;
+  auto sctp = time_point_cast<system_clock::duration>(tp - TP::clock::now() +
+                                                      system_clock::now());
+  return system_clock::to_time_t(sctp);
+}
+
 static std::string time_to_string(const fs::file_time_type &time_point) {
   std::stringstream ss;
-  auto tm = fs::file_time_type::clock::to_time_t(time_point);
+  auto tm = to_time_t(time_point);
   ss << std::asctime(std::localtime(&tm));
   return ss.str();
 }
@@ -318,7 +325,7 @@ struct Target {
         std::make_unique<IncludeCallback>(include_dirs, &dep_time_stamps));
 
     auto src = read_file_str(id.absolute_path);
-    auto ext = id.absolute_path.extension();
+    auto ext = id.absolute_path.extension().string();
     shaderc_shader_kind kind = shaderc_glsl_default_vertex_shader;
     static const std::map<std::string, shaderc_shader_kind> stages = {
         {".vert", shaderc_glsl_default_vertex_shader},
@@ -345,8 +352,8 @@ struct Target {
       }
     }
 
-    auto result =
-        compiler.CompileGlslToSpv(src, kind, id.absolute_path.c_str(), options);
+    auto result = compiler.CompileGlslToSpv(
+        src, kind, (const char *)id.absolute_path.c_str(), options);
 
     if (result.GetCompilationStatus() != shaderc_compilation_status_success) {
       std::stringstream ss;
@@ -463,7 +470,7 @@ load_directory(const fs::path &dir_path,
     if (target_config.contains("includes")) {
       for (auto &inc : target_config["includes"]) {
         if (inc.is_string()) {
-          include_dirs.insert(get_absolute(inc));
+          include_dirs.insert(get_absolute(inc.get<std::string>()));
         } else {
           raise_error(frill_file_path,
                       "include directories should be specified with string");
@@ -550,7 +557,7 @@ load_directory(const fs::path &dir_path,
 
   for (auto &inc : frill["includes"]) {
     if (inc.is_string()) {
-      current_includes.insert(get_absolute(inc));
+      current_includes.insert(get_absolute(inc.get<std::string>()));
     } else {
       raise_error(frill_file_path,
                   "include directories should be specified with string");
