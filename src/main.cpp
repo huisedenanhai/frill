@@ -52,6 +52,7 @@ write_file(const fs::path &file_path, const char *data, size_t size) {
   os.write(data, size);
   os.close();
 }
+
 static void write_file(const fs::path &file_path, const std::string &str) {
   write_file(file_path, str.c_str(), str.size());
 }
@@ -71,8 +72,20 @@ struct TargetId {
     return js;
   }
 
+  void load_json(const json::json &js) {
+    absolute_path = js["path"].get<std::string>();
+    flags.clear();
+    for (auto &flag : js["flags"]) {
+      flags.insert(flag.get<std::string>());
+    }
+  }
+
   bool operator==(const TargetId &rhs) const {
     return absolute_path == rhs.absolute_path && flags == rhs.flags;
+  }
+
+  bool operator!=(const TargetId &rhs) const {
+    return !(*this == rhs);
   }
 };
 
@@ -84,8 +97,133 @@ static std::string time_to_string(const fs::file_time_type &time_point) {
 }
 
 static std::string last_write_time_str(const fs::path &path) {
+  static std::mutex mutex;
+  std::lock_guard<std::mutex> guard(mutex);
+  // fs::last_write_time is not thread safe
   return time_to_string(fs::last_write_time(path));
 }
+
+class IncludeCallback : public shaderc::CompileOptions::IncluderInterface {
+public:
+  IncludeCallback(std::set<fs::path> include_dirs,
+                  std::map<fs::path, std::string> *dep_time_stamps)
+      : _include_dirs(std::move(include_dirs)),
+        _dep_time_stamps(dep_time_stamps) {}
+
+  // Handles shaderc_include_resolver_fn callbacks.
+  shaderc_include_result *GetInclude(const char *requested_source,
+                                     shaderc_include_type type,
+                                     const char *requesting_source,
+                                     size_t include_depth) override {
+    constexpr size_t max_include_depth = 50;
+    if (include_depth > max_include_depth) {
+      std::stringstream ss;
+      ss << "include depth exceeds " << max_include_depth;
+      return include_error(ss.str());
+    }
+    auto absolute_include =
+        resolve_include(requested_source, type, requesting_source);
+    if (absolute_include.has_value()) {
+      _dep_time_stamps->emplace(*absolute_include,
+                                last_write_time_str(*absolute_include));
+      return load_include(*absolute_include);
+    }
+    return include_error("failed to resolve include");
+  }
+
+  // Handles shaderc_include_result_release_fn callbacks.
+  void ReleaseInclude(shaderc_include_result *data) override {}
+
+private:
+  shaderc_include_result *load_include(const fs::path &absolute_include) {
+    auto inc_path = absolute_include.string();
+    auto it = _results.find(inc_path);
+    if (it == _results.end()) {
+      try {
+        auto content = read_file_str(absolute_include);
+        _results[inc_path] = std::make_unique<IncludeResult>(inc_path, content);
+      } catch (std::exception &e) {
+        return include_error(e.what());
+      }
+    }
+    return &_results[inc_path]->result;
+  }
+
+  shaderc_include_result *include_error(const std::string &err) {
+    auto error = std::make_unique<IncludeResult>(err);
+    auto res = &error->result;
+    _errors.emplace_back(std::move(error));
+    return res;
+  }
+
+  std::optional<fs::path> resolve_include(const fs::path &requested_source,
+                                          shaderc_include_type type,
+                                          const fs::path &requesting_source) {
+    switch (type) {
+    case shaderc_include_type_relative:
+      return resolve_relative_include(requested_source, requesting_source);
+    case shaderc_include_type_standard:
+      return resolve_absolute_include(requested_source);
+    }
+    return std::nullopt;
+  }
+
+  std::optional<fs::path>
+  resolve_relative_include(const fs::path &requested_source,
+                           const fs::path &requesting_source) {
+    auto dir = requesting_source.parent_path() / requested_source;
+    if (fs::exists(dir)) {
+      return fs::canonical(dir);
+    }
+    return resolve_absolute_include(requested_source);
+  }
+
+  std::optional<fs::path>
+  resolve_absolute_include(const fs::path &requested_source) {
+    for (auto &inc : _include_dirs) {
+      auto dir = inc / requested_source;
+      if (fs::exists(dir)) {
+        return fs::canonical(dir);
+      }
+    }
+    return std::nullopt;
+  }
+
+  struct IncludeResult {
+    shaderc_include_result result{};
+    struct Data {
+      std::string name;
+      std::string content;
+    };
+    std::unique_ptr<Data> data{};
+
+    IncludeResult(std::string name, std::string content) {
+      data = std::make_unique<Data>();
+      data->name = std::move(name);
+      data->content = std::move(content);
+      result.user_data = nullptr;
+      result.source_name = data->name.c_str();
+      result.source_name_length = data->name.size();
+      result.content = data->content.c_str();
+      result.content_length = data->content.size();
+    }
+
+    explicit IncludeResult(std::string err) {
+      data = std::make_unique<Data>();
+      data->content = std::move(err);
+      result.user_data = nullptr;
+      result.source_name = nullptr;
+      result.source_name_length = 0;
+      result.content = data->content.c_str();
+      result.content_length = data->content.size();
+    }
+  };
+
+  std::unordered_map<std::string, std::unique_ptr<IncludeResult>> _results;
+  std::set<fs::path> _include_dirs;
+  std::map<fs::path, std::string> *_dep_time_stamps;
+  std::vector<std::unique_ptr<IncludeResult>> _errors;
+};
 
 struct Target {
   fs::path relative_path; // relative to input directory
@@ -129,20 +267,37 @@ struct Target {
 
   bool check_outdated(const fs::path &cache_path) const {
     auto ts_path = get_time_stamp_path(cache_path);
+    if (!fs::exists(ts_path)) {
+      return true;
+    }
     try {
       auto js = json::json::parse(read_file_str(ts_path));
-      for (auto &dep : js) {
+      TargetId cache_id{};
+      cache_id.load_json(js["target"]);
+      if (cache_id != id) {
+        return true;
+      }
+      for (auto &dep : js["deps"]) {
         auto p = dep["path"].get<std::string>();
         auto ts = dep["time_stamp"].get<std::string>();
-        auto current_ts = fs::last_write_time(p);
-        if (time_to_string(current_ts) != ts) {
+        if (!fs::exists(p) || last_write_time_str(p) != ts) {
           return true;
         }
       }
+      auto recorded_incs = js["includes"];
+      if (recorded_incs.size() != include_dirs.size()) {
+        return true;
+      }
+      for (const auto &inc : recorded_incs) {
+        if (include_dirs.count(inc.get<std::string>()) == 0) {
+          return true;
+        }
+      }
+
       return false;
     } catch (std::exception &e) {
-      std::cout << "failed to load cache " << ts_path << ": " << e.what()
-                << std::endl;
+      std::cout << "[DEV LOG] failed to load cache " << ts_path << ": "
+                << e.what() << std::endl;
     }
     return true;
   }
@@ -155,134 +310,9 @@ struct Target {
       options.AddMacroDefinition(flag);
     }
 
-    class IncludeCallback : public shaderc::CompileOptions::IncluderInterface {
-    public:
-      IncludeCallback(std::set<fs::path> include_dirs,
-                      std::map<fs::path, std::string> *dep_time_stamps)
-          : _include_dirs(std::move(include_dirs)),
-            _dep_time_stamps(dep_time_stamps) {}
-
-      // Handles shaderc_include_resolver_fn callbacks.
-      shaderc_include_result *GetInclude(const char *requested_source,
-                                         shaderc_include_type type,
-                                         const char *requesting_source,
-                                         size_t include_depth) override {
-        constexpr size_t max_include_depth = 50;
-        if (include_depth > max_include_depth) {
-          std::stringstream ss;
-          ss << "include depth exceeds " << max_include_depth;
-          return include_error(ss.str());
-        }
-        auto absolute_include =
-            resolve_include(requested_source, type, requesting_source);
-        if (absolute_include.has_value()) {
-          _dep_time_stamps->emplace(*absolute_include,
-                                    last_write_time_str(*absolute_include));
-          return load_include(*absolute_include);
-        }
-        return include_error("failed to resolve include");
-      }
-
-      // Handles shaderc_include_result_release_fn callbacks.
-      void ReleaseInclude(shaderc_include_result *data) override {}
-
-    private:
-      shaderc_include_result *load_include(const fs::path &absolute_include) {
-        auto inc_path = absolute_include.string();
-        auto it = _results.find(inc_path);
-        if (it == _results.end()) {
-          try {
-            auto content = read_file_str(absolute_include);
-            _results[inc_path] =
-                std::make_unique<IncludeResult>(inc_path, content);
-          } catch (std::exception &e) {
-            return include_error(e.what());
-          }
-        }
-        return &_results[inc_path]->result;
-      }
-
-      shaderc_include_result *include_error(const std::string &err) {
-        auto error = std::make_unique<IncludeResult>(err);
-        auto res = &error->result;
-        _errors.emplace_back(std::move(error));
-        return res;
-      }
-
-      std::optional<fs::path>
-      resolve_include(const fs::path &requested_source,
-                      shaderc_include_type type,
-                      const fs::path &requesting_source) {
-        switch (type) {
-        case shaderc_include_type_relative:
-          return resolve_relative_include(requested_source, requesting_source);
-        case shaderc_include_type_standard:
-          return resolve_absolute_include(requested_source);
-        }
-        return std::nullopt;
-      }
-
-      std::optional<fs::path>
-      resolve_relative_include(const fs::path &requested_source,
-                               const fs::path &requesting_source) {
-        auto dir = requesting_source.parent_path() / requested_source;
-        if (fs::exists(dir)) {
-          return fs::canonical(dir);
-        }
-        return resolve_absolute_include(requested_source);
-      }
-
-      std::optional<fs::path>
-      resolve_absolute_include(const fs::path &requested_source) {
-        for (auto &inc : _include_dirs) {
-          auto dir = inc / requested_source;
-          if (fs::exists(dir)) {
-            return fs::canonical(dir);
-          }
-        }
-        return std::nullopt;
-      }
-
-      struct IncludeResult {
-        shaderc_include_result result{};
-        struct Data {
-          std::string name;
-          std::string content;
-        };
-        std::unique_ptr<Data> data{};
-
-        IncludeResult(std::string name, std::string content) {
-          data = std::make_unique<Data>();
-          data->name = std::move(name);
-          data->content = std::move(content);
-          result.user_data = nullptr;
-          result.source_name = data->name.c_str();
-          result.source_name_length = data->name.size();
-          result.content = data->content.c_str();
-          result.content_length = data->content.size();
-        }
-
-        explicit IncludeResult(std::string err) {
-          data = std::make_unique<Data>();
-          data->content = std::move(err);
-          result.user_data = nullptr;
-          result.source_name = nullptr;
-          result.source_name_length = 0;
-          result.content = data->content.c_str();
-          result.content_length = data->content.size();
-        }
-      };
-
-      std::unordered_map<std::string, std::unique_ptr<IncludeResult>> _results;
-      std::set<fs::path> _include_dirs;
-      std::map<fs::path, std::string> *_dep_time_stamps;
-      std::vector<std::unique_ptr<IncludeResult>> _errors;
-    };
-
     std::map<fs::path, std::string> dep_time_stamps;
-    dep_time_stamps.emplace(
-        id.absolute_path,
-        time_to_string(fs::last_write_time(id.absolute_path)));
+    dep_time_stamps.emplace(id.absolute_path,
+                            last_write_time_str(id.absolute_path));
 
     options.SetIncluder(
         std::make_unique<IncludeCallback>(include_dirs, &dep_time_stamps));
@@ -317,6 +347,7 @@ struct Target {
 
     auto result =
         compiler.CompileGlslToSpv(src, kind, id.absolute_path.c_str(), options);
+
     if (result.GetCompilationStatus() != shaderc_compilation_status_success) {
       std::stringstream ss;
       ss << "flags: [";
@@ -338,12 +369,28 @@ struct Target {
       auto end = reinterpret_cast<const char *>(result.end());
       write_file(fs::absolute(output_dir), beg, end - beg);
 
-      auto js = json::json::array();
-      for (auto &dep : dep_time_stamps) {
-        json::json term;
-        term["path"] = dep.first.string();
-        term["time_stamp"] = dep.second;
-        js.push_back(term);
+      json::json js;
+      js["target"] = id.to_json();
+      {
+        auto deps = json::json::array();
+        // also add output file to deps
+        auto output_canonical = fs::canonical(fs::absolute(output_dir));
+        dep_time_stamps.emplace(output_canonical,
+                                last_write_time_str(output_canonical));
+        for (auto &dep : dep_time_stamps) {
+          json::json term;
+          term["path"] = dep.first.string();
+          term["time_stamp"] = dep.second;
+          deps.push_back(term);
+        }
+        js["deps"] = deps;
+      }
+      {
+        auto incs = json::json::array();
+        for (auto &inc : include_dirs) {
+          incs.push_back(inc.string());
+        }
+        js["includes"] = incs;
       }
       write_file(get_time_stamp_path(cache_path), js.dump(2));
     }
@@ -384,8 +431,10 @@ static json::json parse_json(const std::string &str) {
   return json::json::parse(str, nullptr, true, true);
 }
 
-static std::unordered_set<Target> load_directory(const fs::path &dir_path,
-                                                 const fs::path &project_root) {
+static std::unordered_set<Target>
+load_directory(const fs::path &dir_path,
+               const fs::path &project_root,
+               const std::set<fs::path> &parent_includes) {
   json::json frill;
   auto get_absolute = [&](const fs::path &p) {
     return fs::canonical(fs::absolute(dir_path / p));
@@ -497,15 +546,19 @@ static std::unordered_set<Target> load_directory(const fs::path &dir_path,
     }
   }
 
+  auto current_includes = parent_includes;
+
   for (auto &inc : frill["includes"]) {
     if (inc.is_string()) {
-      for (auto &t : targets) {
-        t.include_dirs.insert(get_absolute(inc));
-      }
+      current_includes.insert(get_absolute(inc));
     } else {
       raise_error(frill_file_path,
                   "include directories should be specified with string");
     }
+  }
+
+  for (auto &t : targets) {
+    t.include_dirs.insert(current_includes.begin(), current_includes.end());
   }
 
   std::unordered_set<Target> unique_targets;
@@ -532,14 +585,60 @@ static std::unordered_set<Target> load_directory(const fs::path &dir_path,
         raise_error(frill_file_path,
                     "subdirectories should be specified as strings");
       } else {
-        auto targets_in_subdir = load_directory(
-            get_absolute(subdir.get<std::string>()), project_root);
+        auto targets_in_subdir =
+            load_directory(get_absolute(subdir.get<std::string>()),
+                           project_root,
+                           current_includes);
         add_unique_targets(targets_in_subdir);
       }
     }
   }
 
   return unique_targets;
+}
+
+void compile_glsl_to_spv(ThreadPool *thread_pool,
+                         const std::vector<Target> &outdated_targets,
+                         const fs::path &dst_path,
+                         const fs::path &cache_path) {
+  std::vector<std::future<void>> futures;
+  futures.reserve(outdated_targets.size());
+
+  {
+    size_t index = 0;
+    for (auto &target : outdated_targets) {
+      futures.emplace_back(
+          thread_pool->schedule([current_index = index,
+                                 task_count = outdated_targets.size(),
+                                 &target,
+                                 &dst_path,
+                                 &cache_path]() {
+            try {
+              {
+                std::stringstream ss;
+                ss << target.id.absolute_path;
+                for (auto &flag : target.id.flags) {
+                  ss << " " << flag;
+                }
+                printf("[%zu/%zu] compiling %s\n",
+                       current_index + 1,
+                       task_count,
+                       ss.str().c_str());
+              }
+              target.compile(dst_path / target.output_file_relative_dir(),
+                             cache_path);
+            } catch (std::exception &e) {
+              fprintf(stderr, "%s\n", e.what());
+            }
+          }));
+
+      index++;
+    }
+  }
+
+  for (auto &fut : futures) {
+    fut.wait();
+  }
 }
 
 static int
@@ -562,7 +661,7 @@ fired_main(const std::string &src_dir =
   }
   cache_path /= "__frill_cache__";
   try {
-    auto targets = load_directory(src_path, src_path);
+    auto targets = load_directory(src_path, src_path, {});
 
     std::vector<Target> outdated_targets{};
     for (auto &t : targets) {
@@ -571,47 +670,14 @@ fired_main(const std::string &src_dir =
       }
     }
 
-    auto thread_pool = std::make_unique<ThreadPool>(thread_count);
-    std::vector<std::future<void>> futures;
-    futures.reserve(outdated_targets.size());
-
-    {
-      size_t index = 0;
-      for (auto &target : outdated_targets) {
-        futures.emplace_back(
-            thread_pool->schedule([current_index = index,
-                                   task_count = outdated_targets.size(),
-                                   &target,
-                                   &dst_path,
-                                   &cache_path]() {
-              try {
-                {
-                  std::stringstream ss;
-                  ss << target.id.absolute_path;
-                  for (auto &flag : target.id.flags) {
-                    ss << " " << flag;
-                  }
-                  printf("[%zu/%zu] compiling %s\n",
-                         current_index + 1,
-                         task_count,
-                         ss.str().c_str());
-                }
-                target.compile(dst_path / target.output_file_relative_dir(),
-                               cache_path);
-              } catch (std::exception &e) {
-                fprintf(stderr, "%s\n", e.what());
-              }
-            }));
-
-        index++;
-      }
-    }
     if (outdated_targets.empty()) {
-      std::cout << "targets updated, nothing to compile" << std::endl;
+      std::cout << "all targets updated, nothing to compile" << std::endl;
+      return 0;
     }
-    for (auto &fut : futures) {
-      fut.wait();
-    }
+
+    auto thread_pool = std::make_unique<ThreadPool>(thread_count);
+    compile_glsl_to_spv(
+        thread_pool.get(), outdated_targets, dst_path, cache_path);
   } catch (const std::exception &e) {
     std::cerr << e.what() << std::endl;
     return -1;
