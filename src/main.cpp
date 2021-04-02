@@ -1,3 +1,4 @@
+#include "detail/target_id.hpp"
 #include "thread_pool.hpp"
 #include <chrono>
 #include <filesystem>
@@ -56,38 +57,6 @@ write_file(const fs::path &file_path, const char *data, size_t size) {
 static void write_file(const fs::path &file_path, const std::string &str) {
   write_file(file_path, str.c_str(), str.size());
 }
-
-struct TargetId {
-  fs::path absolute_path;
-  std::set<std::string> flags;
-
-  json::json to_json() const {
-    json::json js{};
-    js["path"] = absolute_path;
-    auto flags_js = json::json::array();
-    for (auto &flag : flags) {
-      flags_js.push_back(flag);
-    }
-    js["flags"] = flags_js;
-    return js;
-  }
-
-  void load_json(const json::json &js) {
-    absolute_path = js["path"].get<std::string>();
-    flags.clear();
-    for (auto &flag : js["flags"]) {
-      flags.insert(flag.get<std::string>());
-    }
-  }
-
-  bool operator==(const TargetId &rhs) const {
-    return absolute_path == rhs.absolute_path && flags == rhs.flags;
-  }
-
-  bool operator!=(const TargetId &rhs) const {
-    return !(*this == rhs);
-  }
-};
 
 template <typename TP> std::time_t to_time_t(TP tp) {
   using namespace std::chrono;
@@ -234,15 +203,16 @@ private:
 
 struct Target {
   fs::path relative_path; // relative to input directory
-  TargetId id{};
+  frill::TargetId id{};   // using absolute path
   std::set<fs::path> include_dirs;
   fs::path declaring_config_file; // absolute path
+  std::string uid;
 
   std::string display() const {
     std::stringstream ss;
     ss << "{" << std::endl;
     ss << "\trelative_path:\t" << relative_path << "," << std::endl;
-    ss << "\tabsolute_path:\t" << id.absolute_path << "," << std::endl;
+    ss << "\tabsolute_path:\t" << id.path << "," << std::endl;
     ss << "\tinclude_dirs: [" << std::endl;
     for (auto &inc : include_dirs) {
       ss << "\t\t" << inc << "," << std::endl;
@@ -259,13 +229,7 @@ struct Target {
   }
 
   fs::path output_file_relative_dir(const std::string &ext = ".spv") const {
-    std::stringstream ss;
-    ss << relative_path.c_str();
-    for (auto &flag : id.flags) {
-      ss << "." << flag;
-    }
-    ss << ext;
-    return ss.str();
+    return uid + ext;
   }
 
   bool operator==(const Target &rhs) const {
@@ -279,7 +243,7 @@ struct Target {
     }
     try {
       auto js = json::json::parse(read_file_str(ts_path));
-      TargetId cache_id{};
+      frill::TargetId cache_id{};
       cache_id.load_json(js["target"]);
       if (cache_id != id) {
         return true;
@@ -318,14 +282,13 @@ struct Target {
     }
 
     std::map<fs::path, std::string> dep_time_stamps;
-    dep_time_stamps.emplace(id.absolute_path,
-                            last_write_time_str(id.absolute_path));
+    dep_time_stamps.emplace(id.path, last_write_time_str(id.path));
 
     options.SetIncluder(
         std::make_unique<IncludeCallback>(include_dirs, &dep_time_stamps));
 
-    auto src = read_file_str(id.absolute_path);
-    auto ext = id.absolute_path.extension().string();
+    auto src = read_file_str(id.path);
+    auto ext = id.path.extension().string();
     shaderc_shader_kind kind = shaderc_glsl_default_vertex_shader;
     static const std::map<std::string, shaderc_shader_kind> stages = {
         {".vert", shaderc_glsl_default_vertex_shader},
@@ -353,7 +316,7 @@ struct Target {
     }
 
     auto result = compiler.CompileGlslToSpv(
-        src, kind, (const char *)id.absolute_path.c_str(), options);
+        src, kind, (const char *)id.path.c_str(), options);
 
     if (result.GetCompilationStatus() != shaderc_compilation_status_success) {
       std::stringstream ss;
@@ -416,10 +379,10 @@ inline void hash_combine(std::size_t &seed, const T &val) {
 }
 
 namespace std {
-template <> struct hash<TargetId> {
-  size_t operator()(const TargetId &id) const {
+template <> struct hash<frill::TargetId> {
+  size_t operator()(const frill::TargetId &id) const {
     size_t seed = 0;
-    hash_combine(seed, id.absolute_path.string());
+    hash_combine(seed, id.path.string());
     for (auto &flag : id.flags) {
       hash_combine(seed, flag);
     }
@@ -429,7 +392,7 @@ template <> struct hash<TargetId> {
 
 template <> struct hash<Target> {
   size_t operator()(const Target &target) const {
-    return hash<TargetId>()(target.id);
+    return hash<frill::TargetId>()(target.id);
   }
 };
 } // namespace std
@@ -520,7 +483,7 @@ load_directory(const fs::path &dir_path,
         [&](size_t flags_index) {
           if (flags_index == flag_combination.size()) {
             Target t;
-            t.id.absolute_path = absolute_path;
+            t.id.path = absolute_path;
             t.relative_path = relative_path;
             t.include_dirs = include_dirs;
             t.declaring_config_file = frill_file_path;
@@ -623,7 +586,7 @@ void compile_glsl_to_spv(ThreadPool *thread_pool,
             try {
               {
                 std::stringstream ss;
-                ss << target.id.absolute_path;
+                ss << target.id.path;
                 for (auto &flag : target.id.flags) {
                   ss << " " << flag;
                 }
@@ -648,6 +611,43 @@ void compile_glsl_to_spv(ThreadPool *thread_pool,
   }
 }
 
+static void assign_uid(std::vector<Target> &targets) {
+  std::set<size_t> id;
+  std::function<size_t(const std::string &)> get_unique_uid =
+      [&](const std::string &name) {
+        auto h = std::hash<std::string>()(name);
+        if (id.count(h) != 0) {
+          return get_unique_uid(name + "+");
+        }
+        id.insert(h);
+        return h;
+      };
+  for (auto &t : targets) {
+    std::stringstream ss;
+    ss << t.id.path;
+    for (auto &f : t.id.flags) {
+      ss << "." << f;
+    }
+    t.uid = std::to_string(get_unique_uid(ss.str()));
+  }
+}
+
+static void build_index(const std::vector<Target> &targets,
+                        const fs::path &output) {
+  auto js = json::json::array();
+  for (auto &t : targets) {
+    frill::TargetId id;
+    id.path = t.relative_path;
+    id.flags = t.id.flags;
+
+    json::json term;
+    term["target"] = id.to_json();
+    term["uid"] = t.uid;
+    js.push_back(term);
+  }
+  write_file(output, js.dump(2));
+}
+
 static int
 fired_main(const std::string &src_dir =
                fire::arg({"-S", "--source-dir", "source file directory"}, "."),
@@ -668,7 +668,13 @@ fired_main(const std::string &src_dir =
   }
   cache_path /= "__frill_cache__";
   try {
-    auto targets = load_directory(src_path, src_path, {});
+    std::vector<Target> targets;
+    {
+      auto unique_targets = load_directory(src_path, src_path, {});
+      targets.insert(
+          targets.end(), unique_targets.begin(), unique_targets.end());
+    }
+    assign_uid(targets);
 
     std::vector<Target> outdated_targets{};
     for (auto &t : targets) {
@@ -676,6 +682,9 @@ fired_main(const std::string &src_dir =
         outdated_targets.push_back(t);
       }
     }
+
+    // update index no matter build outdated or not
+    build_index(targets, dst_path / "index.json");
 
     if (outdated_targets.empty()) {
       std::cout << "all targets updated, nothing to compile" << std::endl;
