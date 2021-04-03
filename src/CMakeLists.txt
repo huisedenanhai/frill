@@ -1,15 +1,15 @@
-add_executable(frill main.cpp thread_pool.hpp)
+add_executable(frill main.cpp)
 target_compile_features(frill PRIVATE cxx_std_17)
 target_link_libraries(frill PRIVATE
         fire-hpp
         json
         shaderc
-        frill_archive)
+        frill_misc)
 
 add_library(frill_archive
         archive.cpp
-        archive.hpp
-        detail/target_id.cpp
-        detail/target_id.hpp)
+        archive.hpp)
 target_compile_features(frill_archive PRIVATE cxx_std_17)
-target_link_libraries(frill_archive PRIVATE json)
+target_link_libraries(frill_archive PRIVATE json frill_misc)
+
+add_subdirectory(misc)
