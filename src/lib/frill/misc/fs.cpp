@@ -3,8 +3,9 @@
 #include <sstream>
 
 namespace frill {
-inline std::ifstream open_file(const fs::path &file_path) {
-  std::ifstream t(file_path);
+inline std::ifstream open_file(const fs::path &file_path,
+                               std::ios::openmode mode) {
+  std::ifstream t(file_path, mode);
   if (!t.good()) {
     std::stringstream ss;
     ss << "failed to open " << file_path;
@@ -14,14 +15,14 @@ inline std::ifstream open_file(const fs::path &file_path) {
 }
 
 std::string read_file_str(const fs::path &file_path) {
-  auto t = open_file(file_path);
+  auto t = open_file(file_path, std::ios::in);
   std::string str((std::istreambuf_iterator<char>(t)),
                   std::istreambuf_iterator<char>());
   return str;
 }
 
 std::vector<uint8_t> read_file_binary(const fs::path &file_path) {
-  auto t = open_file(file_path);
+  auto t = open_file(file_path, std::ios::in | std::ios::binary);
   std::vector<uint8_t> data((std::istreambuf_iterator<char>(t)),
                             std::istreambuf_iterator<char>());
   return data;

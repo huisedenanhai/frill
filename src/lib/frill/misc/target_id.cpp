@@ -3,7 +3,7 @@
 namespace frill {
 json::json TargetId::to_json() const {
   json::json js{};
-  js["path"] = path;
+  js["path"] = path.string();
   auto flags_js = json::json::array();
   for (auto &flag : flags) {
     flags_js.push_back(flag);

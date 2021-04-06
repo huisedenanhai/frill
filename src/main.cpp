@@ -282,8 +282,8 @@ struct Target {
       }
     }
 
-    auto result = compiler.CompileGlslToSpv(
-        src, kind, (const char *)id.path.c_str(), options);
+    auto result =
+        compiler.CompileGlslToSpv(src, kind, id.path.string().c_str(), options);
 
     if (result.GetCompilationStatus() != shaderc_compilation_status_success) {
       std::stringstream ss;
