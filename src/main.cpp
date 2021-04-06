@@ -1,9 +1,8 @@
+#include "misc/fs.hpp"
 #include "misc/target_id.hpp"
 #include "misc/thread_pool.hpp"
 #include <chrono>
-#include <filesystem>
 #include <fire-hpp/fire.hpp>
-#include <fstream>
 #include <functional>
 #include <iostream>
 #include <json/json.hpp>
@@ -18,44 +17,12 @@
 #include <vector>
 
 namespace json = nlohmann;
-namespace fs = std::filesystem;
+namespace fs = frill::fs;
 
 static void raise_error(const fs::path &config, const std::string &err) {
   std::stringstream ss;
   ss << "error: " << config << ": " << err;
   throw std::runtime_error(ss.str());
-}
-
-static std::string read_file_str(const fs::path &file_path) {
-  std::ifstream t(file_path);
-  if (!t.good()) {
-    std::stringstream ss;
-    ss << "failed to open " << file_path;
-    throw std::runtime_error(ss.str());
-  }
-  std::string str((std::istreambuf_iterator<char>(t)),
-                  std::istreambuf_iterator<char>());
-  t.close();
-  return str;
-}
-
-static void
-write_file(const fs::path &file_path, const char *data, size_t size) {
-  auto dir = file_path.parent_path();
-  fs::create_directories(dir);
-
-  std::ofstream os(file_path, std::ios::out | std::ios::binary);
-  if (!os.good()) {
-    std::stringstream ss;
-    ss << "failed to open " << file_path;
-    throw std::runtime_error(ss.str());
-  }
-  os.write(data, size);
-  os.close();
-}
-
-static void write_file(const fs::path &file_path, const std::string &str) {
-  write_file(file_path, str.c_str(), str.size());
 }
 
 template <typename TP> std::time_t to_time_t(TP tp) {
@@ -116,7 +83,7 @@ private:
     auto it = _results.find(inc_path);
     if (it == _results.end()) {
       try {
-        auto content = read_file_str(absolute_include);
+        auto content = frill::read_file_str(absolute_include);
         _results[inc_path] = std::make_unique<IncludeResult>(inc_path, content);
       } catch (std::exception &e) {
         return include_error(e.what());
@@ -242,7 +209,7 @@ struct Target {
       return true;
     }
     try {
-      auto js = json::json::parse(read_file_str(ts_path));
+      auto js = json::json::parse(frill::read_file_str(ts_path));
       frill::TargetId cache_id{};
       cache_id.load_json(js["target"]);
       if (cache_id != id) {
@@ -287,7 +254,7 @@ struct Target {
     options.SetIncluder(
         std::make_unique<IncludeCallback>(include_dirs, &dep_time_stamps));
 
-    auto src = read_file_str(id.path);
+    auto src = frill::read_file_str(id.path);
     auto ext = id.path.extension().string();
     shaderc_shader_kind kind = shaderc_glsl_default_vertex_shader;
     static const std::map<std::string, shaderc_shader_kind> stages = {
@@ -337,7 +304,7 @@ struct Target {
     } else {
       auto beg = reinterpret_cast<const char *>(result.begin());
       auto end = reinterpret_cast<const char *>(result.end());
-      write_file(fs::absolute(output_dir), beg, end - beg);
+      frill::write_file(fs::absolute(output_dir), beg, end - beg);
 
       json::json js;
       js["target"] = id.to_json();
@@ -362,7 +329,7 @@ struct Target {
         }
         js["includes"] = incs;
       }
-      write_file(get_time_stamp_path(cache_path), js.dump(2));
+      frill::write_file(get_time_stamp_path(cache_path), js.dump(2));
     }
   }
 
@@ -372,24 +339,7 @@ private:
   }
 };
 
-template <typename T>
-inline void hash_combine(std::size_t &seed, const T &val) {
-  std::hash<T> hasher;
-  seed ^= hasher(val) + 0x9e3779b9 + (seed << 6) + (seed >> 2);
-}
-
 namespace std {
-template <> struct hash<frill::TargetId> {
-  size_t operator()(const frill::TargetId &id) const {
-    size_t seed = 0;
-    hash_combine(seed, id.path.string());
-    for (auto &flag : id.flags) {
-      hash_combine(seed, flag);
-    }
-    return seed;
-  }
-};
-
 template <> struct hash<Target> {
   size_t operator()(const Target &target) const {
     return hash<frill::TargetId>()(target.id);
@@ -412,7 +362,7 @@ load_directory(const fs::path &dir_path,
 
   auto frill_file_path = get_absolute("frill.json");
   try {
-    auto frill_str = read_file_str(frill_file_path);
+    auto frill_str = frill::read_file_str(frill_file_path);
     frill = parse_json(frill_str);
   } catch (const std::exception &e) {
     std::stringstream ss;
@@ -645,7 +595,7 @@ static void build_index(const std::vector<Target> &targets,
     term["uid"] = t.uid;
     js.push_back(term);
   }
-  write_file(output, js.dump(2));
+  frill::write_file(output, js.dump(2));
 }
 
 static int
