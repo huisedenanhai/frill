@@ -26,6 +26,7 @@ public:
 class FolderArchive : public IArchive {
 public:
   explicit FolderArchive(const char *folder_path);
+  ~FolderArchive();
 
   std::optional<Shader>
   load(const char *path, const char **flags, uint32_t flag_count) override;

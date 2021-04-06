@@ -17,7 +17,7 @@ TargetId make_target_id(const fs::path &path, It flag_start, It flag_end) {
 class FolderArchive::Impl {
 public:
   explicit Impl(fs::path folder_path) : _folder_path(std::move(folder_path)) {
-    auto index_json = read_file_str(_folder_path / "index.js");
+    auto index_json = read_file_str(_folder_path / "index.json");
     auto js = json::json::parse(index_json);
     for (auto &term : js) {
       TargetId id;
@@ -55,4 +55,6 @@ FolderArchive::load(const char *path, const char **flags, uint32_t flag_count) {
   auto id = make_target_id(path, flags, flags + flag_count);
   return _impl->load(id);
 }
+
+FolderArchive::~FolderArchive() = default;
 } // namespace frill
