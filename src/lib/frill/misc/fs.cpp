@@ -5,13 +5,25 @@
 
 namespace frill {
 namespace fs {
+namespace {
+struct IdentityCvt {
+  std::string from_bytes(const char *str) {
+    return str;
+  }
+
+  std::string to_bytes(const char *str) {
+    return str;
+  }
+};
+
 auto converter() {
 #ifdef WIN32
   return std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>>();
 #else
-  return std::codecvt<char, char>(); // identity convert
+  return IdentityCvt();
 #endif
 }
+} // namespace
 
 path::path(const char *str)
     : std::filesystem::path(converter().from_bytes(str)) {}
