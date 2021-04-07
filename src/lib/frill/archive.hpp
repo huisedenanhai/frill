@@ -13,6 +13,7 @@ struct Shader {
 
 class IArchive {
 public:
+  // path encoded with utf-8
   virtual std::optional<Shader>
   load(const char *path, const char **flags, uint32_t flag_count) = 0;
 

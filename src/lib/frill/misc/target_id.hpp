@@ -1,12 +1,12 @@
 #pragma once
 
+#include "fs.hpp"
 #include <filesystem>
 #include <json/json.hpp>
 #include <set>
 #include <string>
 
 namespace frill {
-namespace fs = std::filesystem;
 namespace json = nlohmann;
 
 struct TargetId {

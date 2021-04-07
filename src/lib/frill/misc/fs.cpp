@@ -1,8 +1,26 @@
 #include "fs.hpp"
+#include <codecvt>
 #include <fstream>
 #include <sstream>
 
 namespace frill {
+namespace fs {
+auto converter() {
+#ifdef WIN32
+  return std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>>();
+#else
+  return std::codecvt<char, char>(); // identity convert
+#endif
+}
+
+path::path(const char *str)
+    : std::filesystem::path(converter().from_bytes(str)) {}
+
+std::string path::string() const {
+  return converter().to_bytes(c_str());
+}
+} // namespace fs
+
 inline std::ifstream open_file(const fs::path &file_path,
                                std::ios::openmode mode) {
   std::ifstream t(file_path, mode);

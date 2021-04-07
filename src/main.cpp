@@ -608,13 +608,14 @@ fired_main(const std::string &src_dir =
            unsigned int thread_count =
                fire::arg({"-j", "--thread-count", "worker thread count"},
                          std::thread::hardware_concurrency())) {
-  fs::path src_path = src_dir;
-  fs::path dst_path = dst_dir;
+  // command line arguments are already in the target encoding
+  fs::path src_path = std::filesystem::path(src_dir);
+  fs::path dst_path = std::filesystem::path(dst_dir);
   fs::path cache_path;
   if (cache_dir == "<dst_dir>") {
     cache_path = dst_path;
   } else {
-    cache_path = cache_dir;
+    cache_path = std::filesystem::path(cache_dir);
   }
   cache_path /= "__frill_cache__";
   try {
