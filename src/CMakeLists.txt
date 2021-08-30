@@ -1,4 +1,10 @@
-add_executable(frill main.cpp)
+add_executable(frill
+        main.cpp
+        package.cpp
+        package.hpp
+        target.cpp
+        target.hpp
+        )
 target_compile_features(frill PRIVATE cxx_std_17)
 target_link_libraries(frill PRIVATE
         fire-hpp
