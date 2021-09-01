@@ -316,17 +316,29 @@ fired_main(const std::string &src_dir =
     auto index = build_index(targets);
     frill::save_json_file(index, dst_path / "index.json");
 
-    if (outdated_targets.empty()) {
-      std::cout << "all targets updated, nothing to compile" << std::endl;
-    } else {
+    bool nothing_to_do = true;
+    bool need_run_compile = !outdated_targets.empty();
+
+    if (need_run_compile) {
+      nothing_to_do = false;
       auto thread_pool = std::make_unique<ThreadPool>(thread_count);
       compile_glsl_to_spv(
           thread_pool.get(), outdated_targets, dst_path, cache_path);
     }
 
-    // TODO do package on demand
     auto header_path = dst_path / "frill_shaders.hpp";
-    package_to_hpp(dst_path, header_path);
+    bool header_outdated = header_file_outdated(cache_path, header_path);
+    if (need_run_compile || header_outdated) {
+      nothing_to_do = false;
+      std::cout << "generate C++ header to "
+                << fs::canonical(fs::absolute(header_path)) << std::endl;
+      package_to_hpp(dst_path, cache_path, header_path);
+    }
+
+    if (nothing_to_do) {
+      std::cout << "all targets updated, nothing to compile" << std::endl;
+    }
+
   } catch (const std::exception &e) {
     std::cerr << e.what() << std::endl;
     return -1;
