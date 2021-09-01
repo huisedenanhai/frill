@@ -27,4 +27,34 @@ bool TargetId::operator==(const TargetId &rhs) const {
 bool TargetId::operator!=(const TargetId &rhs) const {
   return !(*this == rhs);
 }
+
+json::json IndexTerm::to_json() const {
+  json::json term;
+  term["target"] = target.to_json();
+  term["uid"] = uid;
+  return term;
+}
+
+void IndexTerm::load_json(const nlohmann::json &js) {
+  target.load_json(js["target"]);
+  uid = js["uid"].get<std::string>();
+}
+
+json::json IndexFile::to_json() const {
+  auto js = json::json::array();
+  for (auto &t : targets) {
+    js.push_back(t.to_json());
+  }
+  return js;
+}
+
+void IndexFile::load_json(const nlohmann::json &js) {
+  targets.clear();
+  for (auto &term_js : js) {
+    IndexTerm term{};
+    term.load_json(term_js);
+    targets.push_back(std::move(term));
+  }
+}
+
 } // namespace frill

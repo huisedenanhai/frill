@@ -1,7 +1,6 @@
 #include "archive.hpp"
 #include "misc/fs.hpp"
 #include "misc/target_id.hpp"
-#include <json/json.hpp>
 
 namespace json = nlohmann;
 
@@ -17,13 +16,11 @@ TargetId make_target_id(const fs::path &path, It flag_start, It flag_end) {
 class FolderArchive::Impl {
 public:
   explicit Impl(fs::path folder_path) : _folder_path(std::move(folder_path)) {
-    auto index_json = read_file_str(_folder_path / "index.json");
-    auto js = json::json::parse(index_json);
-    for (auto &term : js) {
-      TargetId id;
-      id.load_json(term["target"]);
-      auto term_path = fs::canonical(fs::absolute(
-          _folder_path / (term["uid"].get<std::string>() + ".spv")));
+    auto index_file = load_json_file<IndexFile>(_folder_path / "index.json");
+    for (auto &term : index_file.targets) {
+      TargetId id = term.target;
+      auto term_path =
+          fs::canonical(fs::absolute(_folder_path / (term.uid + ".spv")));
       _index.emplace(std::move(id), std::move(term_path));
     }
   }

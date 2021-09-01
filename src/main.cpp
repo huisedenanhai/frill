@@ -14,6 +14,7 @@
 #include <unordered_set>
 #include <vector>
 
+#include "package.hpp"
 #include "target.hpp"
 
 namespace json = nlohmann;
@@ -262,20 +263,17 @@ static void assign_uid(std::vector<Target> &targets) {
   }
 }
 
-static void build_index(const std::vector<Target> &targets,
-                        const fs::path &output) {
-  auto js = json::json::array();
+static frill::IndexFile build_index(const std::vector<Target> &targets) {
+  frill::IndexFile index{};
   for (auto &t : targets) {
-    frill::TargetId id;
+    frill::IndexTerm term{};
+    frill::TargetId &id = term.target;
     id.path = t.relative_path;
     id.flags = t.id.flags;
-
-    json::json term;
-    term["target"] = id.to_json();
-    term["uid"] = t.uid;
-    js.push_back(term);
+    term.uid = t.uid;
+    index.targets.push_back(std::move(term));
   }
-  frill::write_file(output, js.dump(2));
+  return index;
 }
 
 static int
@@ -315,16 +313,20 @@ fired_main(const std::string &src_dir =
     }
 
     // update index no matter build outdated or not
-    build_index(targets, dst_path / "index.json");
+    auto index = build_index(targets);
+    frill::save_json_file(index, dst_path / "index.json");
 
     if (outdated_targets.empty()) {
       std::cout << "all targets updated, nothing to compile" << std::endl;
-      return 0;
+    } else {
+      auto thread_pool = std::make_unique<ThreadPool>(thread_count);
+      compile_glsl_to_spv(
+          thread_pool.get(), outdated_targets, dst_path, cache_path);
     }
 
-    auto thread_pool = std::make_unique<ThreadPool>(thread_count);
-    compile_glsl_to_spv(
-        thread_pool.get(), outdated_targets, dst_path, cache_path);
+    // TODO do package on demand
+    auto header_path = dst_path / "frill_shaders.hpp";
+    package_to_hpp(dst_path, header_path);
   } catch (const std::exception &e) {
     std::cerr << e.what() << std::endl;
     return -1;

@@ -1,4 +1,5 @@
 #include "target.hpp"
+#include "config.h"
 #include <iostream>
 #include <sstream>
 
@@ -179,6 +180,7 @@ std::string Target::display() const {
   ss << "}";
   return ss.str();
 }
+
 fs::path Target::output_file_relative_dir(const std::string &ext) const {
   return uid + ext;
 }
@@ -190,6 +192,10 @@ bool Target::check_outdated(const fs::path &cache_path) const {
   }
   try {
     auto js = json::json::parse(frill::read_file_str(ts_path));
+    if (!js.contains("version") || js["version"].get<int>() != FRILL_VERSION) {
+      return true;
+    }
+
     frill::TargetId cache_id{};
     cache_id.load_json(js["target"]);
     if (cache_id != id) {
@@ -289,6 +295,7 @@ void Target::compile(const fs::path &output_dir,
 
     json::json js;
     js["target"] = id.to_json();
+    js["version"] = FRILL_VERSION;
     {
       auto deps = json::json::array();
       // also add output file to deps

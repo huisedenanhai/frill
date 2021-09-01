@@ -28,6 +28,37 @@ inline void hash_combine(std::size_t &seed, const T &val) {
   seed ^= hasher(val) + 0x9e3779b9 + (seed << 6) + (seed >> 2);
 }
 
+struct IndexTerm {
+  TargetId target;
+  std::string uid;
+
+  json::json to_json() const;
+
+  void load_json(const json::json &js);
+};
+
+struct IndexFile {
+  std::vector<IndexTerm> targets;
+
+  json::json to_json() const;
+
+  void load_json(const json::json &js);
+};
+
+template <typename T> T load_json_file(const fs::path &p) {
+  auto js_str = read_file_str(p);
+  auto js = json::json::parse(js_str);
+
+  T t{};
+  t.load_json(js);
+
+  return t;
+}
+
+template <typename T> void save_json_file(const T &t, const fs::path &p) {
+  frill::write_file(p, t.to_json().dump(2));
+}
+
 } // namespace frill
 
 namespace std {
