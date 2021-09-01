@@ -5,7 +5,6 @@
 #include <frill/misc/thread_pool.hpp>
 #include <functional>
 #include <iostream>
-#include <json/json.hpp>
 #include <optional>
 #include <set>
 #include <sstream>

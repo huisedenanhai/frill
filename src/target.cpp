@@ -22,10 +22,13 @@ template <typename TP> std::time_t to_time_t(TP tp) {
 }
 
 static std::string time_to_string(const fs::file_time_type &time_point) {
-  std::stringstream ss;
-  auto tm = to_time_t(time_point);
-  ss << std::asctime(std::localtime(&tm));
-  return ss.str();
+  auto t = to_time_t(time_point);
+  tm time_info{};
+  localtime_s(&time_info, &t);
+  constexpr size_t TIME_STR_BUF_SIZE = 128;
+  char buf[TIME_STR_BUF_SIZE]{};
+  asctime_s(buf, TIME_STR_BUF_SIZE, &time_info);
+  return buf;
 }
 
 static std::string last_write_time_str(const fs::path &path) {
@@ -203,6 +206,7 @@ bool Target::check_outdated(const fs::path &cache_path) const {
     if (recorded_incs.size() != include_dirs.size()) {
       return true;
     }
+
     for (const auto &inc : recorded_incs) {
       if (include_dirs.count(inc.get<std::string>()) == 0) {
         return true;
