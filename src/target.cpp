@@ -1,8 +1,9 @@
 #include "target.hpp"
 #include <iostream>
-#include <json/json.hpp>
 #include <sstream>
 
+#include <mutex>
+#include <optional>
 #include <shaderc/shaderc.hpp>
 
 namespace json = nlohmann;
