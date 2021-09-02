@@ -330,8 +330,8 @@ fired_main(const std::string &src_dir =
     bool header_outdated = header_file_outdated(cache_path, header_path);
     if (need_run_compile || header_outdated) {
       nothing_to_do = false;
-      std::cout << "generate C++ header to "
-                << fs::canonical(fs::absolute(header_path)) << std::endl;
+      std::cout << "generate C++ header to " << fs::absolute(header_path)
+                << std::endl;
       package_to_hpp(dst_path, cache_path, header_path);
     }
 

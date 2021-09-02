@@ -25,6 +25,7 @@ void package_to_hpp(const frill::fs::path &shader_folder,
   os << "#include <set>" << std::endl;
   os << "#include <string>" << std::endl;
   os << "#include <utility>" << std::endl;
+  os << "#include <unordered_map>" << std::endl;
   os << std::endl;
 
   auto index =
@@ -106,8 +107,8 @@ TargetId make_target_id(const std::string &path, It flag_start, It flag_end) {
 
   os << R"(
 namespace std {
-template <> struct hash<frill::TargetId> {
-  size_t operator()(const frill::TargetId &id) const {
+template <> struct hash<frill_shaders::TargetId> {
+  size_t operator()(const frill_shaders::TargetId &id) const {
     size_t seed = 0;
     frill_shaders::hash_combine(seed, id.path);
     for (auto &flag : id.flags) {
@@ -129,7 +130,7 @@ struct MemoryView {
 // return (nullptr, 0) if not found
 inline MemoryView
 load(const char *path, const char **flags, uint32_t flag_count) {
-  static std::unorderd_map<TargetId, MemoryView> s_id_to_shader = {
+  static std::unordered_map<TargetId, MemoryView> s_id_to_shader = {
 )";
   // init id to shader mapping
   {
@@ -171,7 +172,7 @@ load(const char *path, const char **flags, uint32_t flag_count) {
   if (it == s_id_to_shader.end()) {
     return MemoryView{};
   }
-  return *it;
+  return it->second;
 }
 )" << std::endl;
   os << "} // namespace frill_shaders" << std::endl;
