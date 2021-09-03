@@ -3,6 +3,7 @@
 #include <iostream>
 #include <sstream>
 
+#include <ctime>
 #include <mutex>
 #include <optional>
 #include <shaderc/shaderc.hpp>
@@ -24,11 +25,12 @@ template <typename TP> std::time_t to_time_t(TP tp) {
 
 static std::string time_to_string(const fs::file_time_type &time_point) {
   auto t = to_time_t(time_point);
-  tm time_info{};
-  localtime_s(&time_info, &t);
+  tm now{};
+  localtime_r(&t, &now);
+
   constexpr size_t TIME_STR_BUF_SIZE = 128;
   char buf[TIME_STR_BUF_SIZE]{};
-  asctime_s(buf, TIME_STR_BUF_SIZE, &time_info);
+  strftime(buf, TIME_STR_BUF_SIZE, "%Y-%m-%d %H:%M:%S", &now);
   return buf;
 }
 
