@@ -26,7 +26,11 @@ template <typename TP> std::time_t to_time_t(TP tp) {
 static std::string time_to_string(const fs::file_time_type &time_point) {
   auto t = to_time_t(time_point);
   tm now{};
+#ifdef __APPLE__
   localtime_r(&t, &now);
+#else
+  localtime_s(&now, &t);
+#endif
 
   constexpr size_t TIME_STR_BUF_SIZE = 128;
   char buf[TIME_STR_BUF_SIZE]{};
