@@ -61,3 +61,5 @@ Frill add default macros depending on the shader stage inferred from file extens
 | .rcall    | FRILL_SHADER_STAGE_CALLABLE        |
 | .task     | FRILL_SHADER_STAGE_TASK            |
 | .mesh     | FRILL_SHADER_STAGE_MESH            |
+
+For `.glsl` file, one can manually specify a shader stage macro listed above to hint the compiler the shader kind.

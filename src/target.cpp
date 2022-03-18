@@ -287,6 +287,15 @@ void Target::compile(const fs::path &output_dir,
 
   {
     auto it = stages.find(ext);
+    if (ext == ".glsl") {
+      // For .glsl file, infer shader kind based on given flags
+      for (auto &[e, f] : stage_flags) {
+        if (id.flags.count(f) > 0) {
+          it = stages.find(e);
+          break;
+        }
+      }
+    }
     if (it != stages.end()) {
       kind = it->second;
     }
@@ -295,7 +304,10 @@ void Target::compile(const fs::path &output_dir,
   {
     auto it = stage_flags.find(ext);
     if (it != stage_flags.end()) {
-      options.AddMacroDefinition(it->second);
+      auto stage_flag = it->second;
+      if (id.flags.count(stage_flag) == 0) {
+        options.AddMacroDefinition(it->second);
+      }
     }
   }
 
