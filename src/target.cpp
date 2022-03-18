@@ -268,10 +268,34 @@ void Target::compile(const fs::path &output_dir,
       {".mesh", shaderc_glsl_default_mesh_shader},
   };
 
+  static const std::map<std::string, std::string> stage_flags = {
+      {".vert", "FRILL_SHADER_STAGE_VERT"},
+      {".frag", "FRILL_SHADER_STAGE_FRAG"},
+      {".tesc", "FRILL_SHADER_STAGE_TESS_CONTROL"},
+      {".tese", "FRILL_SHADER_STAGE_TESS_EVALUATION"},
+      {".geom", "FRILL_SHADER_STAGE_GEOM"},
+      {".comp", "FRILL_SHADER_STAGE_COMP"},
+      {".rgen", "FRILL_SHADER_STAGE_RAY_GEN"},
+      {".rahit", "FRILL_SHADER_STAGE_ANY_HIT"},
+      {".rchit", "FRILL_SHADER_STAGE_CLOSEST_HIT"},
+      {".rmiss", "FRILL_SHADER_STAGE_MISS"},
+      {".rint", "FRILL_SHADER_STAGE_INTERSECTION"},
+      {".rcall", "FRILL_SHADER_STAGE_CALLABLE"},
+      {".task", "FRILL_SHADER_STAGE_TASK"},
+      {".mesh", "FRILL_SHADER_STAGE_MESH"},
+  };
+
   {
     auto it = stages.find(ext);
     if (it != stages.end()) {
       kind = it->second;
+    }
+  }
+
+  {
+    auto it = stage_flags.find(ext);
+    if (it != stage_flags.end()) {
+      options.AddMacroDefinition(it->second);
     }
   }
 
