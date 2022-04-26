@@ -3,9 +3,13 @@
 GLSL build system. Frill automatically resolves include dependencies for GLSL shader files and builds outdated targets
 in parallel. All shader variants for different flag combinations will be built.
 
-It should work on macOS and Windows, as I use Frill on these platforms.
-
 > WARNING: this project is under development
+
+## Platforms
+
++ macOS
++ Linux
++ Windows
 
 ## Download
 
