@@ -1,0 +1,16 @@
+[package]
+edition = "2021"
+name = "frill-rs"
+version = "0.1.0"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+anyhow = "1.0.71"
+clap = {version = "4.3.10", features = ["derive"]}
+filetime = "0.2.21"
+near-stable-hasher = "0.17.0"
+rayon = "1.7"
+serde = {version = "1.0.166", features = ["derive"]}
+serde_json = "1.0"
+shaderc = "0.8.2"

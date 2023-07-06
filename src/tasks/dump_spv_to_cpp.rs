@@ -1,0 +1,2 @@
+#[derive(Hash)]
+struct DumpSpirvToCpp {}
