@@ -189,7 +189,7 @@ impl GLSLCompileTask {
         if let Some(Some(ext)) = self.file.extension().map(|os_str| os_str.to_str()) {
             if let Some(kind) = SHADER_EXTENSIONS
                 .iter()
-                .find_map(|(stage_ext, _, kind)| (*stage_ext == ext).then(|| kind))
+                .find_map(|(stage_ext, _, kind)| (*stage_ext == ext).then_some(kind))
             {
                 return Ok(*kind);
             }
@@ -199,7 +199,7 @@ impl GLSLCompileTask {
                 if let Some(kind) = self.defines.iter().find_map(|flag| {
                     SHADER_EXTENSIONS
                         .iter()
-                        .find_map(|(_, stage_flag, kind)| (*stage_flag == flag).then(|| kind))
+                        .find_map(|(_, stage_flag, kind)| (*stage_flag == flag).then_some(kind))
                 }) {
                     return Ok(*kind);
                 } else {
