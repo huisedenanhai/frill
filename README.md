@@ -14,11 +14,13 @@ in parallel. All shader variants for different flag combinations will be built.
 ## Usage
 
 ```
+Usage: frill-rs [OPTIONS] --output-dir <OUTPUT_DIR> --source-dir <SOURCE_DIR>
+
 Options:
-  -o, --output-dir <OUTPUT_DIR>  
-  -s, --source-dir <SOURCE_DIR>  
-  -c, --cache-dir <CACHE_DIR>    
-  -f, --force-rebuild            
+  -o, --output-dir <OUTPUT_DIR>
+  -s, --source-dir <SOURCE_DIR>
+  -c, --cache-dir <CACHE_DIR>
+  -f, --force-rebuild
   -h, --help                     Print help
 ```
 
