@@ -1,6 +1,6 @@
 use std::{
     cell::RefCell,
-    collections::{BTreeSet, HashMap},
+    collections::BTreeSet,
     hash::Hash,
     io::Write,
     path::{Path, PathBuf},
@@ -32,7 +32,9 @@ impl Task for GLSLCompileTask {
         let ctx = RefCell::new(ctx);
         let mut options = shaderc::CompileOptions::new().unwrap();
 
-        options.add_macro_definition(&self.stage_macro()?, None);
+        if let Some(stage_macro) = self.stage_macro() {
+            options.add_macro_definition(&stage_macro, None);
+        }
 
         for def in &self.defines {
             options.add_macro_definition(def, None);
@@ -108,6 +110,43 @@ impl Task for GLSLCompileTask {
     }
 }
 
+const SHADER_EXTENSIONS: &[(&str, &str, ShaderKind)] = &[
+    ("vert", "FRILL_SHADER_STAGE_VERT", ShaderKind::Vertex),
+    ("frag", "FRILL_SHADER_STAGE_FRAG", ShaderKind::Fragment),
+    (
+        "tesc",
+        "FRILL_SHADER_STAGE_TESS_CONTROL",
+        ShaderKind::TessControl,
+    ),
+    (
+        "tese",
+        "FRILL_SHADER_STAGE_TESS_EVALUATION",
+        ShaderKind::TessEvaluation,
+    ),
+    ("geom", "FRILL_SHADER_STAGE_GEOM", ShaderKind::Geometry),
+    ("comp", "FRILL_SHADER_STAGE_COMP", ShaderKind::Compute),
+    (
+        "rgen",
+        "FRILL_SHADER_STAGE_RAY_GEN",
+        ShaderKind::RayGeneration,
+    ),
+    ("rahit", "FRILL_SHADER_STAGE_ANY_HIT", ShaderKind::AnyHit),
+    (
+        "rchit",
+        "FRILL_SHADER_STAGE_CLOSEST_HIT",
+        ShaderKind::ClosestHit,
+    ),
+    ("rmiss", "FRILL_SHADER_STAGE_MISS", ShaderKind::Miss),
+    (
+        "rint",
+        "FRILL_SHADER_STAGE_INTERSECTION",
+        ShaderKind::Intersection,
+    ),
+    ("rcall", "FRILL_SHADER_STAGE_CALLABLE", ShaderKind::Callable),
+    ("task", "FRILL_SHADER_STAGE_TASK", ShaderKind::Task),
+    ("mesh", "FRILL_SHADER_STAGE_MESH", ShaderKind::Mesh),
+];
+
 impl GLSLCompileTask {
     fn new(file: PathBuf, include_dirs: Vec<PathBuf>, defines: Vec<String>) -> Self {
         Self {
@@ -133,54 +172,41 @@ impl GLSLCompileTask {
         format!("{:X}.spv", hash)
     }
 
-    fn stage_macro(&self) -> anyhow::Result<String> {
-        let flags = HashMap::from([
-            ("vert", "FRILL_SHADER_STAGE_VERT"),
-            ("frag", "FRILL_SHADER_STAGE_FRAG"),
-            ("tesc", "FRILL_SHADER_STAGE_TESS_CONTROL"),
-            ("tese", "FRILL_SHADER_STAGE_TESS_EVALUATION"),
-            ("geom", "FRILL_SHADER_STAGE_GEOM"),
-            ("comp", "FRILL_SHADER_STAGE_COMP"),
-            ("rgen", "FRILL_SHADER_STAGE_RAY_GEN"),
-            ("rahit", "FRILL_SHADER_STAGE_ANY_HIT"),
-            ("rchit", "FRILL_SHADER_STAGE_CLOSEST_HIT"),
-            ("rmiss", "FRILL_SHADER_STAGE_MISS"),
-            ("rint", "FRILL_SHADER_STAGE_INTERSECTION"),
-            ("rcall", "FRILL_SHADER_STAGE_CALLABLE"),
-            ("task", "FRILL_SHADER_STAGE_TASK"),
-            ("mesh", "FRILL_SHADER_STAGE_MESH"),
-        ]);
-
+    fn stage_macro(&self) -> Option<String> {
         if let Some(Some(ext)) = self.file.extension().map(|os_str| os_str.to_str()) {
-            if let Some(flag) = flags.get(ext) {
-                return Ok(flag.to_string());
+            if let Some(flag) = SHADER_EXTENSIONS
+                .iter()
+                .find_map(|(stage_ext, flag, _)| (*stage_ext == ext).then(|| flag.to_string()))
+            {
+                return Some(flag);
             }
         }
 
-        Err(anyhow::anyhow!("invalid shader file extension"))
+        None
     }
 
     fn shader_kind(&self) -> anyhow::Result<shaderc::ShaderKind> {
-        let kinds = HashMap::from([
-            ("vert", ShaderKind::Vertex),
-            ("frag", ShaderKind::Fragment),
-            ("tesc", ShaderKind::TessControl),
-            ("tese", ShaderKind::TessEvaluation),
-            ("geom", ShaderKind::Geometry),
-            ("comp", ShaderKind::Compute),
-            ("rgen", ShaderKind::RayGeneration),
-            ("rahit", ShaderKind::AnyHit),
-            ("rchit", ShaderKind::ClosestHit),
-            ("rmiss", ShaderKind::Miss),
-            ("rint", ShaderKind::Intersection),
-            ("rcall", ShaderKind::Callable),
-            ("task", ShaderKind::Task),
-            ("mesh", ShaderKind::Mesh),
-        ]);
-
         if let Some(Some(ext)) = self.file.extension().map(|os_str| os_str.to_str()) {
-            if let Some(kind) = kinds.get(ext) {
+            if let Some(kind) = SHADER_EXTENSIONS
+                .iter()
+                .find_map(|(stage_ext, _, kind)| (*stage_ext == ext).then(|| kind))
+            {
                 return Ok(*kind);
+            }
+
+            if ext == "glsl" {
+                // Use flags to determine shader stage
+                if let Some(kind) = self.defines.iter().find_map(|flag| {
+                    SHADER_EXTENSIONS
+                        .iter()
+                        .find_map(|(_, stage_flag, kind)| (*stage_flag == flag).then(|| kind))
+                }) {
+                    return Ok(*kind);
+                } else {
+                    return Err(anyhow::anyhow!(
+                        "Should specify a stage macro for *.glsl file"
+                    ));
+                }
             }
         }
 
