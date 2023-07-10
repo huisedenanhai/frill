@@ -14,6 +14,7 @@ use std::{
     path::{Path, PathBuf},
     rc::Rc,
 };
+use tasks::pack_cpp::PackCpp;
 
 use crate::tasks::compile_glsl::load_glsl_tasks;
 
@@ -176,6 +177,15 @@ pub struct TaskOutput {
     pub file: PathBuf,
 }
 
+impl TaskOutput {
+    pub fn from_file_name(file_name: String) -> Self {
+        Self {
+            uri: file_name.clone(),
+            file: file_name.into(),
+        }
+    }
+}
+
 pub trait Task: Hash {
     fn summary(&self) -> String;
     fn run(&self, ctx: &mut Context) -> anyhow::Result<Vec<TaskOutput>>;
@@ -283,7 +293,7 @@ impl Options {
         Ok(outputs)
     }
 
-    fn execute_task(
+    fn execute_task_at_index(
         &self,
         index: usize,
         count: usize,
@@ -295,6 +305,10 @@ impl Options {
         })
     }
 
+    fn execute_task(&self, task: &impl Task) -> anyhow::Result<Vec<TaskOutput>> {
+        self.execute_task_at_index(0, 1, task)
+    }
+
     fn execute_tasks<T>(&self, tasks: &[T]) -> anyhow::Result<Vec<TaskOutput>>
     where
         T: Task + Sync + Send,
@@ -303,7 +317,7 @@ impl Options {
         tasks
             .par_iter()
             .enumerate()
-            .map(|(index, task)| self.execute_task(index, count, task))
+            .map(|(index, task)| self.execute_task_at_index(index, count, task))
             .reduce(|| Ok(vec![]), merge_task_results)
     }
 }
@@ -347,4 +361,8 @@ fn main() {
     let glsl_tasks = load_glsl_tasks(&options.source_dir, &[]).unwrap();
     let outputs = options.execute_tasks(&glsl_tasks).unwrap();
     write_index(&options, &outputs);
+
+    options
+        .execute_task(&PackCpp {})
+        .expect("failed to pack assets to cpp file");
 }
