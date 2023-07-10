@@ -1,21 +1,22 @@
 use std::{
     cell::RefCell,
-    collections::HashMap,
+    collections::{BTreeSet, HashMap},
     hash::Hash,
     io::Write,
     path::{Path, PathBuf},
 };
 
+use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 use shaderc::{IncludeCallbackResult, ShaderKind};
 
-use crate::{HashExt, Task};
+use crate::{HashExt, Task, TaskOutput};
 
 #[derive(Hash, Debug, Default)]
 pub struct GLSLCompileTask {
     file: PathBuf,
-    include_dirs: Vec<PathBuf>,
-    defines: Vec<String>,
+    include_dirs: BTreeSet<PathBuf>,
+    defines: BTreeSet<String>,
 }
 
 impl Task for GLSLCompileTask {
@@ -23,11 +24,11 @@ impl Task for GLSLCompileTask {
         format!(
             "Compiling {} {}",
             self.file.to_string_lossy(),
-            self.defines.join(",")
+            self.defines.iter().join(",")
         )
     }
 
-    fn run(&self, ctx: &mut crate::Context) -> anyhow::Result<()> {
+    fn run(&self, ctx: &mut crate::Context) -> anyhow::Result<Vec<TaskOutput>> {
         let ctx = RefCell::new(ctx);
         let mut options = shaderc::CompileOptions::new().unwrap();
 
@@ -84,7 +85,7 @@ impl Task for GLSLCompileTask {
 
         let compiler = shaderc::Compiler::new().unwrap();
 
-        let source_text = &ctx.borrow_mut().read_to_string(&self.file)?;
+        let source_text = ctx.borrow_mut().read_to_string(&self.file)?;
         let artifact = compiler.compile_into_spirv(
             &source_text,
             self.shader_kind()?,
@@ -95,11 +96,34 @@ impl Task for GLSLCompileTask {
 
         let mut out_file = ctx.borrow_mut().create(self.output_file_name())?;
         out_file.write_all(artifact.as_binary_u8())?;
-        Ok(())
+        let uri = self.uri(ctx.borrow().source_root_dir());
+        Ok(vec![TaskOutput {
+            uri,
+            file: self.output_file_name().into(),
+        }])
     }
 }
 
 impl GLSLCompileTask {
+    fn new(file: PathBuf, include_dirs: Vec<PathBuf>, defines: Vec<String>) -> Self {
+        Self {
+            file,
+            include_dirs: include_dirs.into_iter().collect(),
+            defines: defines.into_iter().collect(),
+        }
+    }
+
+    fn uri(&self, root_folder: &Path) -> String {
+        format!(
+            "{}/flags={}",
+            self.file
+                .strip_prefix(root_folder)
+                .unwrap()
+                .to_string_lossy(),
+            self.defines.iter().join(",")
+        )
+    }
+
     fn output_file_name(&self) -> String {
         let hash = self.calc_hash();
         format!("{:X}.spv", hash)
@@ -202,8 +226,8 @@ impl SourceInfoDetailed {
         let mut result = vec![];
         let mut includes = includes.to_vec();
         if let Some(additional_includes) = &self.includes {
-            for addtional_include in additional_includes {
-                includes.push(resolve_path(path, &addtional_include)?);
+            for additional_include in additional_includes {
+                includes.push(resolve_path(path, additional_include)?);
             }
         }
         let file = resolve_path(path, &self.file)?;
@@ -220,18 +244,14 @@ impl SourceInfoDetailed {
         result: &mut Vec<GLSLCompileTask>,
     ) {
         let multi_compiles = vec![];
-        let multi_compiles = if let Some(multi_compiles) = &self.multi_compile {
-            &multi_compiles
-        } else {
-            &multi_compiles
-        };
+        let multi_compiles = self.multi_compile.as_ref().unwrap_or(&multi_compiles);
 
         if index >= multi_compiles.len() {
-            result.push(GLSLCompileTask {
-                file: file.into(),
-                include_dirs: includes.into(),
-                defines: flag_stack.clone(),
-            });
+            result.push(GLSLCompileTask::new(
+                file.into(),
+                includes.into(),
+                flag_stack.clone(),
+            ));
 
             return;
         }

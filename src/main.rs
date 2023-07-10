@@ -42,6 +42,7 @@ struct Dependency {
 #[derive(Debug, Serialize, Deserialize, Default)]
 struct Cache {
     deps: Vec<Dependency>,
+    outputs: Vec<TaskOutput>,
 }
 
 impl Cache {
@@ -95,22 +96,35 @@ impl Deref for FileHandle {
     }
 }
 
+impl FileHandle {
+    // returns canonical path
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
 #[derive(Debug)]
 pub struct Context {
     cache: Rc<RefCell<Cache>>,
-    cwd: Vec<PathBuf>,
+    cwd: PathBuf,
+    source_root_dir: PathBuf,
 }
 
 impl Context {
-    pub fn new(cwd: PathBuf) -> Context {
+    pub fn new(cwd: PathBuf, source_root_dir: PathBuf) -> Context {
         Context {
             cache: Default::default(),
-            cwd: vec![cwd],
+            cwd,
+            source_root_dir,
         }
     }
 
     fn cwd(&self) -> &Path {
-        self.cwd.last().unwrap()
+        &self.cwd
+    }
+
+    fn source_root_dir(&self) -> &Path {
+        &self.source_root_dir
     }
 
     fn resolve_path(&self, path: &Path) -> PathBuf {
@@ -154,19 +168,31 @@ impl Context {
             .map_err(|err| anyhow::anyhow!("failed to read from {}: {}", path.display(), err))?;
         Ok(content)
     }
+}
 
-    pub fn push_cwd(&mut self, cwd: PathBuf) {
-        self.cwd.push(cwd);
-    }
-
-    pub fn pop_cwd(&mut self) {
-        self.cwd.pop();
-    }
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct TaskOutput {
+    pub uri: String,
+    pub file: PathBuf,
 }
 
 pub trait Task: Hash {
     fn summary(&self) -> String;
-    fn run(&self, ctx: &mut Context) -> anyhow::Result<()>;
+    fn run(&self, ctx: &mut Context) -> anyhow::Result<Vec<TaskOutput>>;
+}
+
+fn merge_task_results(
+    a: anyhow::Result<Vec<TaskOutput>>,
+    b: anyhow::Result<Vec<TaskOutput>>,
+) -> anyhow::Result<Vec<TaskOutput>> {
+    match (a, b) {
+        (Ok(mut a), Ok(mut b)) => {
+            a.append(&mut b);
+            Ok(a)
+        }
+        (Ok(_), Err(e)) => Err(e),
+        (Err(e), _) => Err(e),
+    }
 }
 
 #[derive(Debug, Parser)]
@@ -182,7 +208,10 @@ struct Options {
 }
 
 impl Options {
-    fn check_outdated_impl(&self, task: &impl Task) -> anyhow::Result<bool> {
+    fn check_cached_output_impl(
+        &self,
+        task: &impl Task,
+    ) -> anyhow::Result<Option<Vec<TaskOutput>>> {
         let cache_file_content =
             std::fs::read_to_string(self.get_cache_dir().join(task.cache_file_name()))?;
         let cache: Cache = serde_json::from_str(&cache_file_content)?;
@@ -191,15 +220,19 @@ impl Options {
             let metadata = std::fs::metadata(&dep.path)?;
             let time = Timestamp::from_metadata(&metadata);
             if time != dep.time_stamp {
-                return Ok(true);
+                return Ok(None);
             }
         }
 
-        Ok(false)
+        Ok(Some(cache.outputs))
     }
 
-    fn check_outdated(&self, task: &impl Task) -> bool {
-        self.check_outdated_impl(task).unwrap_or(true)
+    // Return None is cache is outdated, return previous output if cache is valid
+    fn check_cached_output(&self, task: &impl Task) -> Option<Vec<TaskOutput>> {
+        match self.check_cached_output_impl(task) {
+            Ok(outputs) => outputs,
+            Err(_) => None,
+        }
     }
 
     fn get_cache_dir(&self) -> PathBuf {
@@ -215,9 +248,11 @@ impl Options {
         index: usize,
         count: usize,
         task: &impl Task,
-    ) -> anyhow::Result<()> {
-        if !self.force_rebuild && !self.check_outdated(task) {
-            return Ok(());
+    ) -> anyhow::Result<Vec<TaskOutput>> {
+        if !self.force_rebuild {
+            if let Some(outputs) = self.check_cached_output(task) {
+                return Ok(outputs);
+            }
         }
         let summary = task.summary();
         let digit_count = count.checked_ilog10().unwrap_or(0) as usize + 1;
@@ -230,11 +265,11 @@ impl Options {
             digit_count = digit_count
         );
 
-        let mut ctx = Context::new(self.output_dir.clone());
-        let result = task.run(&mut ctx).map_err(|info| {
-            eprintln!("Error when {}: {}", task.summary(), info);
-            info
-        });
+        let mut ctx = Context::new(self.output_dir.clone(), self.source_dir.clone());
+
+        let outputs = task.run(&mut ctx)?;
+
+        ctx.cache.borrow_mut().outputs = outputs.clone();
 
         // We can not get correct modification time stamp of the cache file before actually write to it.
         // For now we do not track timestamp of the cache file :(
@@ -245,19 +280,22 @@ impl Options {
             cache_json,
         )?;
 
-        result
+        Ok(outputs)
     }
 
-    fn execute_task(&self, index: usize, count: usize, task: &impl Task) -> bool {
-        self.execute_task_impl(index, count, task)
-            .map_err(|info| {
-                eprintln!("Error when {}: {}", task.summary(), info);
-                info
-            })
-            .is_ok()
+    fn execute_task(
+        &self,
+        index: usize,
+        count: usize,
+        task: &impl Task,
+    ) -> anyhow::Result<Vec<TaskOutput>> {
+        self.execute_task_impl(index, count, task).map_err(|info| {
+            eprintln!("Error when {}: {}", task.summary(), info);
+            info
+        })
     }
 
-    fn execute_tasks<T>(&self, tasks: &[T]) -> bool
+    fn execute_tasks<T>(&self, tasks: &[T]) -> anyhow::Result<Vec<TaskOutput>>
     where
         T: Task + Sync + Send,
     {
@@ -266,7 +304,7 @@ impl Options {
             .par_iter()
             .enumerate()
             .map(|(index, task)| self.execute_task(index, count, task))
-            .all(|x| x)
+            .reduce(|| Ok(vec![]), merge_task_results)
     }
 }
 
@@ -287,9 +325,26 @@ impl<T: Hash> HashExt for T {
     }
 }
 
+fn write_index(options: &Options, outputs: &Vec<TaskOutput>) {
+    let index_path = options.output_dir.join("index.json");
+    let outputs_json = serde_json::to_string_pretty(&outputs).unwrap();
+    if let Ok(old_json) = std::fs::read_to_string(&index_path) {
+        if outputs_json == old_json {
+            println!("{} not changed", index_path.to_string_lossy());
+            return;
+        }
+    }
+    println!("Writing {}", index_path.to_string_lossy());
+    std::fs::write(index_path, outputs_json).expect("failed to write index.json");
+}
+
 fn main() {
-    let options = Options::parse();
+    let mut options = Options::parse();
+    options.source_dir = options
+        .source_dir
+        .canonicalize()
+        .expect("invalid source dir");
     let glsl_tasks = load_glsl_tasks(&options.source_dir, &[]).unwrap();
-    options.execute_tasks(&glsl_tasks);
-    println!("Hello, world!");
+    let outputs = options.execute_tasks(&glsl_tasks).unwrap();
+    write_index(&options, &outputs);
 }
