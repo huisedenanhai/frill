@@ -102,6 +102,10 @@ impl Task for GLSLCompileTask {
             file: self.output_file_name().into(),
         }])
     }
+
+    fn version(&self) -> u64 {
+        0
+    }
 }
 
 impl GLSLCompileTask {

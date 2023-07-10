@@ -42,6 +42,7 @@ struct Dependency {
 
 #[derive(Debug, Serialize, Deserialize, Default)]
 struct Cache {
+    version: u64,
     deps: Vec<Dependency>,
     outputs: Vec<TaskOutput>,
 }
@@ -187,6 +188,7 @@ impl TaskOutput {
 }
 
 pub trait Task: Hash {
+    fn version(&self) -> u64;
     fn summary(&self) -> String;
     fn run(&self, ctx: &mut Context) -> anyhow::Result<Vec<TaskOutput>>;
 }
@@ -225,6 +227,10 @@ impl Options {
         let cache_file_content =
             std::fs::read_to_string(self.get_cache_dir().join(task.cache_file_name()))?;
         let cache: Cache = serde_json::from_str(&cache_file_content)?;
+
+        if cache.version != task.version() {
+            return Ok(None);
+        }
 
         for dep in cache.deps {
             let metadata = std::fs::metadata(&dep.path)?;

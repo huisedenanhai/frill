@@ -9,6 +9,10 @@ use crate::{Task, TaskOutput};
 pub struct PackCpp {}
 
 impl Task for PackCpp {
+    fn version(&self) -> u64 {
+        0
+    }
+
     fn summary(&self) -> String {
         format!("Packing assets to {},{}", self.h_name(), self.cpp_name())
     }
