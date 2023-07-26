@@ -162,7 +162,8 @@ impl GLSLCompileTask {
             self.file
                 .strip_prefix(root_folder)
                 .unwrap()
-                .to_string_lossy(),
+                .to_string_lossy()
+                .replace('\\', "/"),
             self.defines.iter().join(",")
         )
     }
