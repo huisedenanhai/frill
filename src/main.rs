@@ -245,10 +245,7 @@ impl Options {
 
     // Return None is cache is outdated, return previous output if cache is valid
     fn check_cached_output(&self, task: &impl Task) -> Option<Vec<TaskOutput>> {
-        match self.check_cached_output_impl(task) {
-            Ok(outputs) => outputs,
-            Err(_) => None,
-        }
+        self.check_cached_output_impl(task).unwrap_or_default()
     }
 
     fn get_cache_dir(&self) -> PathBuf {

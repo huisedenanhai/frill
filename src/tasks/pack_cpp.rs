@@ -36,7 +36,7 @@ impl Task for PackCpp {
             // align data
             let alignment = 16;
             let aligned_size = ((all_bytes.len() + alignment - 1) / alignment) * alignment;
-            all_bytes.append(&mut vec![0u8].repeat(aligned_size - all_bytes.len()));
+            all_bytes.append(&mut [0u8].repeat(aligned_size - all_bytes.len()));
             assert_eq!(all_bytes.len(), aligned_size);
         }
 
